@@ -18,17 +18,45 @@ st.set_page_config(page_title="PDV ECN - Emissão de NFC-e", page_icon="🧾", l
 load_dotenv()
 url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
-token_focus = os.environ.get("FOCUS_NFE_TOKEN", "").strip()
-auth_encoded = base64.b64encode(f"{token_focus}:".encode()).decode()
-
 supabase: Client = create_client(url, key)
 
 TOLERANCIA_TETO = 0.10
 TOLERANCIA_DESCONTO = 0.10
 
+# --- CONTROLE DE LOGIN ---
+if 'cliente_logado' not in st.session_state:
+    st.session_state.cliente_logado = None
+
+if st.session_state.cliente_logado is None:
+    st.title("🔐 Acesso ao Sistema")
+    st.write("Digite o CNPJ da sua loja e a senha para emitir notas.")
+    
+    with st.form("login_form"):
+        cnpj_input = st.text_input("CNPJ (apenas números)", max_chars=14)
+        senha_input = st.text_input("Senha", type="password")
+        submit = st.form_submit_button("Entrar")
+        
+        if submit:
+            res = supabase.table('clientes').select('*').eq('cnpj', cnpj_input).eq('senha', senha_input).execute()
+            if res.data:
+                st.session_state.cliente_logado = res.data[0]
+                st.rerun()
+            else:
+                st.error("CNPJ ou senha inválidos.")
+    st.stop() # Para a execução aqui se não estiver logado
+
+# Se chegou aqui, está logado!
+cliente = st.session_state.cliente_logado
+TOKEN_CLIENTE = cliente.get('token_focus_homologacao', '').strip()
+CNPJ_CLIENTE = cliente['cnpj']
+ID_CLIENTE = cliente['id']
+
+auth_encoded = base64.b64encode(f"{TOKEN_CLIENTE}:".encode()).decode()
+
+# --- FUNÇÕES DO SISTEMA ---
 @st.cache_data(ttl=60)
-def buscar_produtos_com_estoque():
-    produtos = supabase.table('produtos').select('id, descricao, preco_venda, ncm, ean, sujeito_st').execute()
+def buscar_produtos_com_estoque(id_cliente):
+    produtos = supabase.table('produtos').select('id, descricao, preco_venda, ncm, ean, sujeito_st').eq('cliente_id', id_cliente).execute()
     produtos_com_estoque = []
     for p in produtos.data:
         if p.get('preco_venda') is None or p['preco_venda'] <= 0: continue
@@ -42,7 +70,7 @@ def buscar_produtos_com_estoque():
             })
     return produtos_com_estoque
 
-def emitir_nota_focus(carrinho, valor_desconto, valor_total):
+def emitir_nota_focus(carrinho, valor_desconto, valor_total, cnpj_emitente, token_focus):
     fuso_brasilia = timezone(timedelta(hours=-3))
     data_agora = datetime.now(fuso_brasilia).strftime("%Y-%m-%dT%H:%M:%S-03:00")
     items_json = []
@@ -65,7 +93,7 @@ def emitir_nota_focus(carrinho, valor_desconto, valor_total):
     payload = {
         "natureza_operacao": "Venda ao Consumidor", "data_emissao": data_agora, "tipo_documento": 1,
         "finalidade_emissao": 1, "consumidor_final": 1, "presenca_comprador": 1, "modalidade_frete": "9", 
-        "cnpj_emitente": "57468706000108", "destinatario": {"cpf": "12345678909", "nome": "CONSUMIDOR TESTE"},
+        "cnpj_emitente": cnpj_emitente, "destinatario": {"cpf": "12345678909", "nome": "CONSUMIDOR TESTE"},
         "items": items_json, "desconto": float(valor_desconto),
         "pagamentos": [{"forma_pagamento": "01", "valor_pagamento": float(valor_total)}]
     }
@@ -104,19 +132,23 @@ def montar_carrinho(valor_alvo, produtos):
         return {'itens': carrinho, 'valor_atual': valor_atual, 'diferenca': diferenca, 'valor_alvo': valor_alvo}
     return None
 
-# --- INTERFACE ---
-st.title("🛒 PDV Rápido - ECN Contabilidade")
+# --- INTERFACE LOGADO ---
+st.title(f"🛒 PDV Rápido - {cliente['nome']}")
+
+# Botão de Logout
+if st.button("Sair (Logout)"):
+    st.session_state.cliente_logado = None
+    st.rerun()
 
 aba_manual, aba_csv, aba_historico = st.tabs(["🛒 Venda Manual", "📥 Fechamento de Caixa", "🧾 Histórico de Notas"])
 
-# ABA 1: VENDA MANUAL
 with aba_manual:
     st.write("Digite o valor total da venda e o sistema monta o carrinho.")
     valor_alvo = st.number_input("Valor Total da Venda (R$):", min_value=1.0, value=50.0, step=10.0)
     if 'carrinho_atual' not in st.session_state: st.session_state.carrinho_atual = None
     if st.button("🔍 Montar Carrinho", type="primary"):
         st.session_state.carrinho_atual = None
-        produtos = buscar_produtos_com_estoque()
+        produtos = buscar_produtos_com_estoque(ID_CLIENTE)
         if produtos:
             carrinho = montar_carrinho(valor_alvo, produtos)
             if carrinho: st.session_state.carrinho_atual = carrinho
@@ -130,16 +162,16 @@ with aba_manual:
         st.write(f"### 🎯 Total a Pagar: R$ {dados['valor_alvo']:.2f}")
         if st.button("🚀 Confirmar e Emitir NFC-e", type="primary", key="btn_emitir_manual"):
             with st.spinner("📡 Emitindo..."):
-                status_code, retorno = emitir_nota_focus(dados['itens'], dados['diferenca'], dados['valor_alvo'])
+                status_code, retorno = emitir_nota_focus(dados['itens'], dados['diferenca'], dados['valor_alvo'], CNPJ_CLIENTE, TOKEN_CLIENTE)
                 if status_code in [200, 201, 202] and retorno.get('status') == 'autorizado':
                     supabase.table('notas_emitidas').insert({
-                        'cliente_cnpj': '57468706000108', 'numero_nota': retorno.get('numero'),
+                        'cliente_id': ID_CLIENTE, 'cliente_cnpj': CNPJ_CLIENTE, 'numero_nota': retorno.get('numero'),
                         'serie': retorno.get('serie'), 'chave_acesso': retorno.get('chave_nfe', '').replace('NFe', ''),
                         'status': retorno.get('status'), 'valor_total': dados['valor_alvo'], 'json_retorno': retorno
                     }).execute()
                     for item in dados['itens']:
                         supabase.table('estoque_movimentacoes').insert({
-                            'produto_id': item['id'], 'tipo_movimento': 'SAIDA',
+                            'cliente_id': ID_CLIENTE, 'produto_id': item['id'], 'tipo_movimento': 'SAIDA',
                             'quantidade': item['quantidade'], 'valor_unitario': item['preco_unitario'], 'origem': 'VENDA_PAINEL'
                         }).execute()
                     st.balloons()
@@ -149,11 +181,9 @@ with aba_manual:
                 else:
                     st.error(f"Erro: {retorno.get('mensagem_sefaz')}")
 
-# ABA 2: FECHAMENTO DE CAIXA
 with aba_csv:
     st.write("Importe o relatório da InfinityPay para emitir as notas do dia.")
     metodo = st.radio("Como você quer enviar o arquivo?", ["Fazer Upload do Arquivo", "Colar o texto do arquivo (Celular)"])
-    
     df_vendas = None
     if metodo == "Fazer Upload do Arquivo":
         arquivo = st.file_uploader("Selecione o arquivo (CSV ou PDF)", type=["csv", "pdf"])
@@ -205,7 +235,7 @@ with aba_csv:
         st.divider()
         
         if st.button("🚀 EMITIR TODAS AS NOTAS AGORA", type="primary", use_container_width=True):
-            produtos = buscar_produtos_com_estoque()
+            produtos = buscar_produtos_com_estoque(ID_CLIENTE)
             if not produtos: st.error("Não há estoque para emitir.")
             else:
                 sucessos, erros = 0, 0
@@ -218,16 +248,16 @@ with aba_csv:
                     status_texto.write(f"⏳ Emitindo nota {index+1} de {len(vendas_para_emitir)} (R$ {valor_venda:.2f})...")
                     carrinho = montar_carrinho(valor_venda, produtos)
                     if carrinho:
-                        status_code, retorno = emitir_nota_focus(carrinho['itens'], carrinho['diferenca'], valor_venda)
+                        status_code, retorno = emitir_nota_focus(carrinho['itens'], carrinho['diferenca'], valor_venda, CNPJ_CLIENTE, TOKEN_CLIENTE)
                         if status_code in [200, 201, 202] and retorno.get('status') == 'autorizado':
                             supabase.table('notas_emitidas').insert({
-                                'cliente_cnpj': '57468706000108', 'numero_nota': retorno.get('numero'),
+                                'cliente_id': ID_CLIENTE, 'cliente_cnpj': CNPJ_CLIENTE, 'numero_nota': retorno.get('numero'),
                                 'serie': retorno.get('serie'), 'chave_acesso': retorno.get('chave_nfe', '').replace('NFe', ''),
                                 'status': retorno.get('status'), 'valor_total': valor_venda, 'json_retorno': retorno
                             }).execute()
                             for item in carrinho['itens']:
                                 supabase.table('estoque_movimentacoes').insert({
-                                    'produto_id': item['id'], 'tipo_movimento': 'SAIDA',
+                                    'cliente_id': ID_CLIENTE, 'produto_id': item['id'], 'tipo_movimento': 'SAIDA',
                                     'quantidade': item['quantidade'], 'valor_unitario': item['preco_unitario'], 'origem': 'VENDA_ARQUIVO'
                                 }).execute()
                             sucessos += 1
@@ -238,30 +268,20 @@ with aba_csv:
                 status_texto.empty()
                 st.success(f"🏁 Finalizado! Sucessos: {sucessos} | Erros: {erros}")
 
-# ABA 3: HISTÓRICO DE NOTAS
 with aba_historico:
     st.header("🧾 Histórico de Notas Emitidas")
-    st.write("Consulte as notas emitidas e baixe o PDF (DANFE).")
-    
-    # Busca as últimas 50 notas no banco
-    notas = supabase.table('notas_emitidas').select('*').order('emitida_em', desc=True).limit(50).execute()
-    
+    notas = supabase.table('notas_emitidas').select('*').eq('cliente_id', ID_CLIENTE).order('emitida_em', desc=True).limit(50).execute()
     if notas.data:
         for n in notas.data:
             data_formatada = "Data não disponível"
             if n.get('emitida_em'):
-                # Converte a data do banco para o formato brasileiro
                 dt = datetime.fromisoformat(n['emitida_em'].replace('Z', '+00:00'))
                 data_formatada = dt.strftime('%d/%m/%Y %H:%M')
-                
             with st.expander(f"📄 Nota {n.get('numero_nota', 'S/N')} - R$ {n.get('valor_total', 0):.2f} ({data_formatada})"):
                 st.write(f"**Status:** {n.get('status', 'N/A')}")
                 st.write(f"**Chave de Acesso:** `{n.get('chave_acesso', 'N/A')}`")
-                
-                # Pega o caminho do DANFE do JSON salvo
                 json_retorno = n.get('json_retorno', {})
                 caminho_danfe = json_retorno.get('caminho_danfe')
-                
                 if caminho_danfe:
                     url_danfe = f"https://homologacao.focusnfe.com.br{caminho_danfe}"
                     st.markdown(f"[📥 Clique aqui para baixar o DANFE (PDF)]({url_danfe})")
