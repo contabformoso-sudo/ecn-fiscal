@@ -6,7 +6,6 @@ import json
 import base64
 import time
 import pandas as pd
-import io
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -175,7 +174,6 @@ with aba_csv:
     
     if arquivo_csv is not None:
         try:
-            # Lê o CSV
             df = pd.read_csv(arquivo_csv, encoding='utf-8')
             
             # Filtra apenas as vendas Aprovadas
@@ -184,10 +182,16 @@ with aba_csv:
             # Converte os valores para numérico (lidando com vírgula)
             df_vendas['Valor'] = df_vendas['Valor (R$)'].astype(str).str.replace('.', '').str.replace(',', '.').astype(float)
             
-            st.write(f"📊 Encontradas **{len(df_vendas)}** vendas aprovadas no arquivo.")
-            st.write(f"💰 Valor total: **R$ {df_vendas['Valor'].sum():.2f}**")
+            st.success(f"📊 Arquivo lido com sucesso! Encontradas **{len(df_vendas)}** vendas aprovadas.")
+            st.write(f"💰 Valor total das vendas: **R$ {df_vendas['Valor'].sum():.2f}**")
             
-            if st.button("🚀 Emitir Notas do Arquivo", type="primary"):
+            st.divider()
+            
+            st.write("### Pronto para emitir?")
+            st.write("Clique no botão abaixo para o sistema emitir todas as notas automaticamente.")
+            
+            # BOTÃO GRANDE E VISÍVEL
+            if st.button("🚀 EMITIR TODAS AS NOTAS AGORA", type="primary", use_container_width=True):
                 produtos = buscar_produtos_com_estoque()
                 if not produtos:
                     st.error("Não há estoque para emitir.")
@@ -198,12 +202,12 @@ with aba_csv:
                     progresso = st.progress(0)
                     status_texto = st.empty()
                     
-                    # Limita a 15 notas por vez para não travar o celular
+                    # Limita a 15 notas por vez
                     vendas_para_emitir = df_vendas.head(15)
                     
                     for index, row in vendas_para_emitir.iterrows():
                         valor_venda = float(row['Valor'])
-                        status_texto.write(f"Emitindo venda de R$ {valor_venda:.2f}...")
+                        status_texto.write(f"⏳ Emitindo nota {index+1} de {len(vendas_para_emitir)} (R$ {valor_venda:.2f})...")
                         
                         carrinho = montar_carrinho(valor_venda, produtos)
                         if carrinho:
@@ -226,12 +230,12 @@ with aba_csv:
                             erros += 1
                         
                         progresso.progress((index + 1) / len(vendas_para_emitir))
-                        time.sleep(2) # Pausa para não bloquear a Focus
+                        time.sleep(2)
                     
                     status_texto.empty()
                     st.success(f"🏁 Finalizado! Sucessos: {sucessos} | Erros: {erros}")
                     if len(df_vendas) > 15:
-                        st.warning("Limite de 15 notas por vez atingido. Rode novamente para as próximas.")
+                        st.warning("Limite de 15 notas por vez atingido. Rode novamente para o restante.")
                         
         except Exception as e:
             st.error(f"Erro ao ler o CSV: {e}")
