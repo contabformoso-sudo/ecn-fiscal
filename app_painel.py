@@ -13,7 +13,7 @@ from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
-st.set_page_config(page_title="PDV ECN - Emissão de NFC-e", page_icon="🧾", layout="centered")
+st.set_page_config(page_title="PDV ECN - Emissão de NFC-e", page_icon="🧾", layout="wide")
 
 load_dotenv()
 url = os.environ.get("SUPABASE_URL")
@@ -43,17 +43,16 @@ if st.session_state.cliente_logado is None:
                 st.rerun()
             else:
                 st.error("CNPJ ou senha inválidos.")
-    st.stop() # Para a execução aqui se não estiver logado
+    st.stop()
 
 # Se chegou aqui, está logado!
 cliente = st.session_state.cliente_logado
 TOKEN_CLIENTE = cliente.get('token_focus_homologacao', '').strip()
 CNPJ_CLIENTE = cliente['cnpj']
 ID_CLIENTE = cliente['id']
-
 auth_encoded = base64.b64encode(f"{TOKEN_CLIENTE}:".encode()).decode()
 
-# --- FUNÇÕES DO SISTEMA ---
+# --- FUNÇÕES ---
 @st.cache_data(ttl=60)
 def buscar_produtos_com_estoque(id_cliente):
     produtos = supabase.table('produtos').select('id, descricao, preco_venda, ncm, ean, sujeito_st').eq('cliente_id', id_cliente).execute()
@@ -132,13 +131,40 @@ def montar_carrinho(valor_alvo, produtos):
         return {'itens': carrinho, 'valor_atual': valor_atual, 'diferenca': diferenca, 'valor_alvo': valor_alvo}
     return None
 
-# --- INTERFACE LOGADO ---
-st.title(f"🛒 PDV Rápido - {cliente['nome']}")
+def calcular_faturamento_mes(id_cliente):
+    # Pega o primeiro e o último dia do mês atual
+    hoje = datetime.now()
+    primeiro_dia = hoje.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+    
+    notas = supabase.table('notas_emitidas').select('valor_total').eq('cliente_id', id_cliente).gte('emitida_em', primeiro_dia).execute()
+    total = sum(float(n['valor_total']) for n in notas.data) if notas.data else 0.0
+    return total, len(notas.data)
 
-# Botão de Logout
-if st.button("Sair (Logout)"):
-    st.session_state.cliente_logado = None
-    st.rerun()
+# --- BARRA LATERAL (SIDEBAR) COM MANUAL E LOGOUT ---
+with st.sidebar:
+    st.header(f"Olá, {cliente['nome']}")
+    if st.button("Sair (Logout)"):
+        st.session_state.cliente_logado = None
+        st.rerun()
+    
+    st.divider()
+    st.subheader("❓ Ajuda / Manual")
+    with st.expander("Como emitir uma venda manual?"):
+        st.write("1. Digite o valor pago.\n2. Clique em Montar Carrinho.\n3. Confira os itens e clique em Emitir.")
+    with st.expander("Como fazer o Fechamento de Caixa?"):
+        st.write("1. Baixe o relatório da InfinityPay em CSV.\n2. Suba na aba Fechamento.\n3. Clique em Emitir Todas as Notas.")
+    with st.expander("Onde pego o PDF da Nota?"):
+        st.write("Na aba Histórico de Notas, clique em Baixar DANFE.")
+    st.info("Ambiente de Homologação (Testes)")
+
+# --- INTERFACE PRINCIPAL ---
+st.title("🛒 PDV Rápido")
+
+# Resumo de Faturamento
+faturamento, qtd_notas = calcular_faturamento_mes(ID_CLIENTE)
+col1, col2 = st.columns(2)
+col1.metric("Faturamento no Mês", f"R$ {faturamento:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+col2.metric("Notas Emitidas", qtd_notas)
 
 aba_manual, aba_csv, aba_historico = st.tabs(["🛒 Venda Manual", "📥 Fechamento de Caixa", "🧾 Histórico de Notas"])
 
@@ -178,6 +204,7 @@ with aba_manual:
                     st.success("🎉 NOTA AUTORIZADA E ESTOQUE ATUALIZADO!")
                     st.write(f"**Chave:** `{retorno.get('chave_nfe')}`")
                     st.session_state.carrinho_atual = None
+                    st.rerun()
                 else:
                     st.error(f"Erro: {retorno.get('mensagem_sefaz')}")
 
@@ -267,6 +294,7 @@ with aba_csv:
                     time.sleep(2)
                 status_texto.empty()
                 st.success(f"🏁 Finalizado! Sucessos: {sucessos} | Erros: {erros}")
+                st.rerun()
 
 with aba_historico:
     st.header("🧾 Histórico de Notas Emitidas")
