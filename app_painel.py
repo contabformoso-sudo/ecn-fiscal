@@ -6,6 +6,9 @@ import json
 import base64
 import time
 import pandas as pd
+import io
+import pdfplumber
+import re
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -27,13 +30,10 @@ TOLERANCIA_DESCONTO = 0.10
 def buscar_produtos_com_estoque():
     produtos = supabase.table('produtos').select('id, descricao, preco_venda, ncm, ean, sujeito_st').execute()
     produtos_com_estoque = []
-    
     for p in produtos.data:
         if p.get('preco_venda') is None or p['preco_venda'] <= 0: continue
-            
         movs = supabase.table('estoque_movimentacoes').select('tipo_movimento, quantidade').eq('produto_id', p['id']).execute()
         saldo = sum(float(m['quantidade']) if m['tipo_movimento'] == 'ENTRADA' else -float(m['quantidade']) for m in movs.data)
-                
         if saldo > 0:
             produtos_com_estoque.append({
                 'id': p['id'], 'descricao': p['descricao'], 'preco': float(p['preco_venda']),
@@ -45,12 +45,10 @@ def buscar_produtos_com_estoque():
 def emitir_nota_focus(carrinho, valor_desconto, valor_total):
     fuso_brasilia = timezone(timedelta(hours=-3))
     data_agora = datetime.now(fuso_brasilia).strftime("%Y-%m-%dT%H:%M:%S-03:00")
-    
     items_json = []
     for index, item in enumerate(carrinho):
         cfop_saida = "5405" if item.get('sujeito_st') else "5102"
         csosn_saida = "500" if item.get('sujeito_st') else "102"
-
         item_json = {
             "numero_item": str(index + 1), "codigo_produto": str(item['id'])[:10], 
             "descricao": item['descricao'], "cfop": cfop_saida, "unidade_comercial": "UN",
@@ -71,11 +69,9 @@ def emitir_nota_focus(carrinho, valor_desconto, valor_total):
         "items": items_json, "desconto": float(valor_desconto),
         "pagamentos": [{"forma_pagamento": "01", "valor_pagamento": float(valor_total)}]
     }
-
     headers = {"Authorization": f"Basic {auth_encoded}", "Content-Type": "application/json"}
     ref_nota = f"pdv_{int(time.time())}_{random.randint(1,999)}" 
     url_focus = f"https://homologacao.focusnfe.com.br/v2/nfce?ref={ref_nota}"
-
     try:
         response = requests.post(url_focus, json=payload, headers=headers)
         return response.status_code, response.json()
@@ -87,18 +83,15 @@ def montar_carrinho(valor_alvo, produtos):
     valor_teto = valor_alvo * (1 + TOLERANCIA_TETO)
     carrinho = []
     valor_atual = 0.0
-
     for p in produtos:
         if valor_atual >= valor_alvo: break
         qtd_necessaria = int((valor_alvo - valor_atual) // p['preco'])
         qtd_necessaria = max(1, qtd_necessaria)
         qtd_necessaria = min(qtd_necessaria, int(p['saldo']))
         subtotal = qtd_necessaria * p['preco']
-        
         while valor_atual + subtotal > valor_teto and qtd_necessaria > 1:
             qtd_necessaria -= 1
             subtotal = qtd_necessaria * p['preco']
-            
         if valor_atual + subtotal <= valor_teto:
             carrinho.append({
                 'id': p['id'], 'descricao': p['descricao'], 'quantidade': qtd_necessaria,
@@ -106,7 +99,6 @@ def montar_carrinho(valor_alvo, produtos):
                 'ean': p['ean'], 'sujeito_st': p['sujeito_st']
             })
             valor_atual += subtotal
-
     diferenca = valor_atual - valor_alvo
     if diferenca <= valor_alvo * TOLERANCIA_DESCONTO:
         return {'itens': carrinho, 'valor_atual': valor_atual, 'diferenca': diferenca, 'valor_alvo': valor_alvo}
@@ -115,9 +107,8 @@ def montar_carrinho(valor_alvo, produtos):
 # --- INTERFACE ---
 st.title("🛒 PDV Rápido - ECN Contabilidade")
 
-aba_manual, aba_csv = st.tabs(["🛒 Venda Manual", "📥 Fechamento de Caixa (CSV)"])
+aba_manual, aba_csv = st.tabs(["🛒 Venda Manual", "📥 Fechamento de Caixa"])
 
-# ABA 1: VENDA MANUAL
 with aba_manual:
     st.write("Digite o valor total da venda e o sistema monta o carrinho.")
     valor_alvo = st.number_input("Valor Total da Venda (R$):", min_value=1.0, value=50.0, step=10.0)
@@ -130,20 +121,15 @@ with aba_manual:
         produtos = buscar_produtos_com_estoque()
         if produtos:
             carrinho = montar_carrinho(valor_alvo, produtos)
-            if carrinho:
-                st.session_state.carrinho_atual = carrinho
-            else:
-                st.error("❌ DESCONTO RECUSADO: A diferença passa do limite permitido.")
-        else:
-            st.error("Não há produtos com estoque.")
+            if carrinho: st.session_state.carrinho_atual = carrinho
+            else: st.error("❌ DESCONTO RECUSADO: A diferença passa do limite permitido.")
+        else: st.error("Não há produtos com estoque.")
 
     if st.session_state.carrinho_atual:
         dados = st.session_state.carrinho_atual
         st.success(f"✅ Carrinho montado! Desconto: R$ {dados['diferenca']:.2f}")
-        
         for item in dados['itens']:
             st.write(f"📦 **{item['quantidade']:g}x** {item['descricao']} - R$ {item['preco_unitario']:.2f}")
-        
         st.write(f"### 🎯 Total a Pagar: R$ {dados['valor_alvo']:.2f}")
         
         if st.button("🚀 Confirmar e Emitir NFC-e", type="primary", key="btn_emitir_manual"):
@@ -167,75 +153,84 @@ with aba_manual:
                 else:
                     st.error(f"Erro: {retorno.get('mensagem_sefaz')}")
 
-# ABA 2: FECHAMENTO DE CAIXA (Importação CSV)
+# ABA 2: FECHAMENTO DE CAIXA (Aceita CSV ou PDF)
 with aba_csv:
-    st.write("Faça o upload do relatório CSV da InfinityPay para emitir as notas do dia.")
-    arquivo_csv = st.file_uploader("Selecione o arquivo CSV", type="csv")
+    st.write("Faça o upload do relatório da InfinityPay (CSV ou PDF) para emitir as notas do dia.")
     
-    if arquivo_csv is not None:
+    arquivo = st.file_uploader("Selecione o arquivo (CSV ou PDF)", type=["csv", "pdf"])
+    df_vendas = None
+    
+    if arquivo is not None:
         try:
-            df = pd.read_csv(arquivo_csv, encoding='utf-8')
-            
-            # Filtra apenas as vendas Aprovadas
-            df_vendas = df[df['Status'] == 'Aprovada']
-            
-            # Converte os valores para numérico (lidando com vírgula)
-            df_vendas['Valor'] = df_vendas['Valor (R$)'].astype(str).str.replace('.', '').str.replace(',', '.').astype(float)
-            
-            st.success(f"📊 Arquivo lido com sucesso! Encontradas **{len(df_vendas)}** vendas aprovadas.")
-            st.write(f"💰 Valor total das vendas: **R$ {df_vendas['Valor'].sum():.2f}**")
-            
-            st.divider()
-            
-            st.write("### Pronto para emitir?")
-            st.write("Clique no botão abaixo para o sistema emitir todas as notas automaticamente.")
-            
-            # BOTÃO GRANDE E VISÍVEL
-            if st.button("🚀 EMITIR TODAS AS NOTAS AGORA", type="primary", use_container_width=True):
-                produtos = buscar_produtos_com_estoque()
-                if not produtos:
-                    st.error("Não há estoque para emitir.")
-                else:
-                    sucessos = 0
-                    erros = 0
-                    
-                    progresso = st.progress(0)
-                    status_texto = st.empty()
-                    
-                    # Limita a 15 notas por vez
-                    vendas_para_emitir = df_vendas.head(15)
-                    
-                    for index, row in vendas_para_emitir.iterrows():
-                        valor_venda = float(row['Valor'])
-                        status_texto.write(f"⏳ Emitindo nota {index+1} de {len(vendas_para_emitir)} (R$ {valor_venda:.2f})...")
-                        
-                        carrinho = montar_carrinho(valor_venda, produtos)
-                        if carrinho:
-                            status_code, retorno = emitir_nota_focus(carrinho['itens'], carrinho['diferenca'], valor_venda)
-                            if status_code in [200, 201, 202] and retorno.get('status') == 'autorizado':
-                                supabase.table('notas_emitidas').insert({
-                                    'cliente_cnpj': '57468706000108', 'numero_nota': retorno.get('numero'),
-                                    'serie': retorno.get('serie'), 'chave_acesso': retorno.get('chave_nfe', '').replace('NFe', ''),
-                                    'status': retorno.get('status'), 'valor_total': valor_venda, 'json_retorno': retorno
-                                }).execute()
-                                for item in carrinho['itens']:
-                                    supabase.table('estoque_movimentacoes').insert({
-                                        'produto_id': item['id'], 'tipo_movimento': 'SAIDA',
-                                        'quantidade': item['quantidade'], 'valor_unitario': item['preco_unitario'], 'origem': 'VENDA_CSV'
-                                    }).execute()
-                                sucessos += 1
-                            else:
-                                erros += 1
-                        else:
-                            erros += 1
-                        
-                        progresso.progress((index + 1) / len(vendas_para_emitir))
-                        time.sleep(2)
-                    
-                    status_texto.empty()
-                    st.success(f"🏁 Finalizado! Sucessos: {sucessos} | Erros: {erros}")
-                    if len(df_vendas) > 15:
-                        st.warning("Limite de 15 notas por vez atingido. Rode novamente para o restante.")
-                        
+            if arquivo.name.lower().endswith('.csv'):
+                df = pd.read_csv(arquivo, encoding='utf-8')
+                df_vendas = df[df['Status'] == 'Aprovada'].copy()
+                df_vendas['Valor'] = df_vendas['Valor (R$)'].astype(str).str.replace('.', '').str.replace(',', '.').astype(float)
+                
+            elif arquivo.name.lower().endswith('.pdf'):
+                st.info("Lendo arquivo PDF...")
+                texto = ""
+                with pdfplumber.open(arquivo) as pdf:
+                    for pagina in pdf.pages:
+                        texto += pagina.extract_text() + "\n"
+                
+                # A mágica para ler o PDF da InfinityPay
+                # Ele procura linhas que contenham "Pix" ou "Cartão" e o status "Aprovada"
+                linhas = texto.split('\n')
+                vendas_pdf = []
+                for linha in linhas:
+                    if "Aprovada" in linha and ("Pix" in linha or "Cartão" in linha or "Débito" in linha or "Crédito" in linha):
+                        # Pega o valor no final da linha. Ex: ... + 93,95 + 93,95 0,00 (0%) Outro
+                        valores = re.findall(r'\+\s*([\d\.]+,\d{2})', linha)
+                        if valores:
+                            valor_formatado = valores[0].replace('.', '').replace(',', '.')
+                            vendas_pdf.append({"Valor": float(valor_formatado)})
+                
+                if vendas_pdf:
+                    df_vendas = pd.DataFrame(vendas_pdf)
+
         except Exception as e:
-            st.error(f"Erro ao ler o CSV: {e}")
+            st.error(f"Erro ao ler o arquivo: {e}")
+            
+    if df_vendas is not None and not df_vendas.empty:
+        st.success(f"📊 Arquivo lido com sucesso! Encontradas **{len(df_vendas)}** vendas aprovadas.")
+        st.write(f"💰 Valor total: **R$ {df_vendas['Valor'].sum():.2f}**")
+        st.divider()
+        
+        if st.button("🚀 EMITIR TODAS AS NOTAS AGORA", type="primary", use_container_width=True):
+            produtos = buscar_produtos_com_estoque()
+            if not produtos:
+                st.error("Não há estoque para emitir.")
+            else:
+                sucessos, erros = 0, 0
+                progresso = st.progress(0)
+                status_texto = st.empty()
+                vendas_para_emitir = df_vendas.head(15)
+                
+                for index, row in vendas_para_emitir.iterrows():
+                    valor_venda = float(row['Valor'])
+                    status_texto.write(f"⏳ Emitindo nota {index+1} de {len(vendas_para_emitir)} (R$ {valor_venda:.2f})...")
+                    
+                    carrinho = montar_carrinho(valor_venda, produtos)
+                    if carrinho:
+                        status_code, retorno = emitir_nota_focus(carrinho['itens'], carrinho['diferenca'], valor_venda)
+                        if status_code in [200, 201, 202] and retorno.get('status') == 'autorizado':
+                            supabase.table('notas_emitidas').insert({
+                                'cliente_cnpj': '57468706000108', 'numero_nota': retorno.get('numero'),
+                                'serie': retorno.get('serie'), 'chave_acesso': retorno.get('chave_nfe', '').replace('NFe', ''),
+                                'status': retorno.get('status'), 'valor_total': valor_venda, 'json_retorno': retorno
+                            }).execute()
+                            for item in carrinho['itens']:
+                                supabase.table('estoque_movimentacoes').insert({
+                                    'produto_id': item['id'], 'tipo_movimento': 'SAIDA',
+                                    'quantidade': item['quantidade'], 'valor_unitario': item['preco_unitario'], 'origem': 'VENDA_ARQUIVO'
+                                }).execute()
+                            sucessos += 1
+                        else: erros += 1
+                    else: erros += 1
+                    
+                    progresso.progress((index + 1) / len(vendas_para_emitir))
+                    time.sleep(2)
+                
+                status_texto.empty()
+                st.success(f"🏁 Finalizado! Sucessos: {sucessos} | Erros: {erros}")
