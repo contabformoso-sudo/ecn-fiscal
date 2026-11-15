@@ -107,8 +107,9 @@ def montar_carrinho(valor_alvo, produtos):
 # --- INTERFACE ---
 st.title("🛒 PDV Rápido - ECN Contabilidade")
 
-aba_manual, aba_csv = st.tabs(["🛒 Venda Manual", "📥 Fechamento de Caixa"])
+aba_manual, aba_csv, aba_historico = st.tabs(["🛒 Venda Manual", "📥 Fechamento de Caixa", "🧾 Histórico de Notas"])
 
+# ABA 1: VENDA MANUAL
 with aba_manual:
     st.write("Digite o valor total da venda e o sistema monta o carrinho.")
     valor_alvo = st.number_input("Valor Total da Venda (R$):", min_value=1.0, value=50.0, step=10.0)
@@ -148,14 +149,12 @@ with aba_manual:
                 else:
                     st.error(f"Erro: {retorno.get('mensagem_sefaz')}")
 
-# ABA 2: FECHAMENTO DE CAIXA (Upload ou Colar Texto)
+# ABA 2: FECHAMENTO DE CAIXA
 with aba_csv:
     st.write("Importe o relatório da InfinityPay para emitir as notas do dia.")
-    
     metodo = st.radio("Como você quer enviar o arquivo?", ["Fazer Upload do Arquivo", "Colar o texto do arquivo (Celular)"])
     
     df_vendas = None
-    
     if metodo == "Fazer Upload do Arquivo":
         arquivo = st.file_uploader("Selecione o arquivo (CSV ou PDF)", type=["csv", "pdf"])
         if arquivo is not None:
@@ -169,41 +168,31 @@ with aba_csv:
                     texto = ""
                     with pdfplumber.open(arquivo) as pdf:
                         for pagina in pdf.pages: texto += pagina.extract_text() + "\n"
-                    
                     linhas = texto.split('\n')
                     vendas_pdf = []
-                    # Padrão flexível para achar valores como + 95,00 ou 95,00
                     padrao_valor = r'(?:\+\s*)?(\d{1,3}(?:\.\d{3})*,\d{2})'
-                    
                     for linha in linhas:
                         if "Aprovada" in linha and ("Pix" in linha or "Cartão" in linha or "Débito" in linha or "Crédito" in linha):
                             matches = re.findall(padrao_valor, linha)
-                            if matches: 
-                                vendas_pdf.append({"Valor": float(matches[0].replace('.', '').replace(',', '.'))})
-                    if vendas_pdf: 
-                        df_vendas = pd.DataFrame(vendas_pdf)
+                            if matches: vendas_pdf.append({"Valor": float(matches[0].replace('.', '').replace(',', '.'))})
+                    if vendas_pdf: df_vendas = pd.DataFrame(vendas_pdf)
             except Exception as e:
                 st.error(f"Erro ao ler o arquivo: {e}")
-                
     else:
         st.write("Abra o arquivo PDF ou CSV no celular, selecione todo o texto, copie e cole abaixo:")
         texto_colado = st.text_area("Cole o texto aqui:", height=200)
         if texto_colado:
             try:
                 if "Pix" in texto_colado or "Aprovada" in texto_colado:
-                    # Lógica para ler o texto colado do PDF
                     linhas = texto_colado.split('\n')
                     vendas_pdf = []
                     padrao_valor = r'(?:\+\s*)?(\d{1,3}(?:\.\d{3})*,\d{2})'
                     for linha in linhas:
                         if "Aprovada" in linha and ("Pix" in linha or "Cartão" in linha):
                             matches = re.findall(padrao_valor, linha)
-                            if matches: 
-                                vendas_pdf.append({"Valor": float(matches[0].replace('.', '').replace(',', '.'))})
-                    if vendas_pdf: 
-                        df_vendas = pd.DataFrame(vendas_pdf)
+                            if matches: vendas_pdf.append({"Valor": float(matches[0].replace('.', '').replace(',', '.'))})
+                    if vendas_pdf: df_vendas = pd.DataFrame(vendas_pdf)
                 else:
-                    # Lógica para ler o texto colado do CSV
                     df = pd.read_csv(io.StringIO(texto_colado), sep=',')
                     df_vendas = df[df['Status'] == 'Aprovada'].copy()
                     df_vendas['Valor'] = df_vendas['Valor (R$)'].astype(str).str.replace('.', '').str.replace(',', '.').astype(float)
@@ -227,7 +216,6 @@ with aba_csv:
                 for index, row in vendas_para_emitir.iterrows():
                     valor_venda = float(row['Valor'])
                     status_texto.write(f"⏳ Emitindo nota {index+1} de {len(vendas_para_emitir)} (R$ {valor_venda:.2f})...")
-                    
                     carrinho = montar_carrinho(valor_venda, produtos)
                     if carrinho:
                         status_code, retorno = emitir_nota_focus(carrinho['itens'], carrinho['diferenca'], valor_venda)
@@ -245,9 +233,39 @@ with aba_csv:
                             sucessos += 1
                         else: erros += 1
                     else: erros += 1
-                    
                     progresso.progress((index + 1) / len(vendas_para_emitir))
                     time.sleep(2)
-                
                 status_texto.empty()
                 st.success(f"🏁 Finalizado! Sucessos: {sucessos} | Erros: {erros}")
+
+# ABA 3: HISTÓRICO DE NOTAS
+with aba_historico:
+    st.header("🧾 Histórico de Notas Emitidas")
+    st.write("Consulte as notas emitidas e baixe o PDF (DANFE).")
+    
+    # Busca as últimas 50 notas no banco
+    notas = supabase.table('notas_emitidas').select('*').order('emitida_em', desc=True).limit(50).execute()
+    
+    if notas.data:
+        for n in notas.data:
+            data_formatada = "Data não disponível"
+            if n.get('emitida_em'):
+                # Converte a data do banco para o formato brasileiro
+                dt = datetime.fromisoformat(n['emitida_em'].replace('Z', '+00:00'))
+                data_formatada = dt.strftime('%d/%m/%Y %H:%M')
+                
+            with st.expander(f"📄 Nota {n.get('numero_nota', 'S/N')} - R$ {n.get('valor_total', 0):.2f} ({data_formatada})"):
+                st.write(f"**Status:** {n.get('status', 'N/A')}")
+                st.write(f"**Chave de Acesso:** `{n.get('chave_acesso', 'N/A')}`")
+                
+                # Pega o caminho do DANFE do JSON salvo
+                json_retorno = n.get('json_retorno', {})
+                caminho_danfe = json_retorno.get('caminho_danfe')
+                
+                if caminho_danfe:
+                    url_danfe = f"https://homologacao.focusnfe.com.br{caminho_danfe}"
+                    st.markdown(f"[📥 Clique aqui para baixar o DANFE (PDF)]({url_danfe})")
+                else:
+                    st.warning("Link do PDF não disponível para esta nota.")
+    else:
+        st.info("Nenhuma nota emitida ainda.")
