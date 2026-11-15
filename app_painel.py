@@ -132,27 +132,24 @@ def montar_carrinho(valor_alvo, produtos):
     return None
 
 def calcular_faturamento_mes(id_cliente):
-    # Pega o primeiro e o último dia do mês atual
     hoje = datetime.now()
     primeiro_dia = hoje.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
-    
     notas = supabase.table('notas_emitidas').select('valor_total').eq('cliente_id', id_cliente).gte('emitida_em', primeiro_dia).execute()
     total = sum(float(n['valor_total']) for n in notas.data) if notas.data else 0.0
     return total, len(notas.data)
 
-# --- BARRA LATERAL (SIDEBAR) COM MANUAL E LOGOUT ---
+# --- BARRA LATERAL ---
 with st.sidebar:
     st.header(f"Olá, {cliente['nome']}")
     if st.button("Sair (Logout)"):
         st.session_state.cliente_logado = None
         st.rerun()
-    
     st.divider()
     st.subheader("❓ Ajuda / Manual")
     with st.expander("Como emitir uma venda manual?"):
         st.write("1. Digite o valor pago.\n2. Clique em Montar Carrinho.\n3. Confira os itens e clique em Emitir.")
     with st.expander("Como fazer o Fechamento de Caixa?"):
-        st.write("1. Baixe o relatório da InfinityPay em CSV.\n2. Suba na aba Fechamento.\n3. Clique em Emitir Todas as Notas.")
+        st.write("1. Baixe o relatório da sua maquininha em CSV.\n2. Suba na aba Fechamento.\n3. Clique em Emitir Todas as Notas.")
     with st.expander("Onde pego o PDF da Nota?"):
         st.write("Na aba Histórico de Notas, clique em Baixar DANFE.")
     st.info("Ambiente de Homologação (Testes)")
@@ -160,7 +157,6 @@ with st.sidebar:
 # --- INTERFACE PRINCIPAL ---
 st.title("🛒 PDV Rápido")
 
-# Resumo de Faturamento
 faturamento, qtd_notas = calcular_faturamento_mes(ID_CLIENTE)
 col1, col2 = st.columns(2)
 col1.metric("Faturamento no Mês", f"R$ {faturamento:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
@@ -209,55 +205,34 @@ with aba_manual:
                     st.error(f"Erro: {retorno.get('mensagem_sefaz')}")
 
 with aba_csv:
-    st.write("Importe o relatório da InfinityPay para emitir as notas do dia.")
-    metodo = st.radio("Como você quer enviar o arquivo?", ["Fazer Upload do Arquivo", "Colar o texto do arquivo (Celular)"])
+    st.write("Importe o relatório da sua maquininha (formato CSV) para emitir as notas do dia.")
+    
+    arquivo_csv = st.file_uploader("Selecione o arquivo CSV", type="csv")
     df_vendas = None
-    if metodo == "Fazer Upload do Arquivo":
-        arquivo = st.file_uploader("Selecione o arquivo (CSV ou PDF)", type=["csv", "pdf"])
-        if arquivo is not None:
-            try:
-                if arquivo.name.lower().endswith('.csv'):
-                    df = pd.read_csv(arquivo, encoding='utf-8')
-                    df_vendas = df[df['Status'] == 'Aprovada'].copy()
-                    df_vendas['Valor'] = df_vendas['Valor (R$)'].astype(str).str.replace('.', '').str.replace(',', '.').astype(float)
-                elif arquivo.name.lower().endswith('.pdf'):
-                    st.info("Lendo arquivo PDF...")
-                    texto = ""
-                    with pdfplumber.open(arquivo) as pdf:
-                        for pagina in pdf.pages: texto += pagina.extract_text() + "\n"
-                    linhas = texto.split('\n')
-                    vendas_pdf = []
-                    padrao_valor = r'(?:\+\s*)?(\d{1,3}(?:\.\d{3})*,\d{2})'
-                    for linha in linhas:
-                        if "Aprovada" in linha and ("Pix" in linha or "Cartão" in linha or "Débito" in linha or "Crédito" in linha):
-                            matches = re.findall(padrao_valor, linha)
-                            if matches: vendas_pdf.append({"Valor": float(matches[0].replace('.', '').replace(',', '.'))})
-                    if vendas_pdf: df_vendas = pd.DataFrame(vendas_pdf)
-            except Exception as e:
-                st.error(f"Erro ao ler o arquivo: {e}")
-    else:
-        st.write("Abra o arquivo PDF ou CSV no celular, selecione todo o texto, copie e cole abaixo:")
-        texto_colado = st.text_area("Cole o texto aqui:", height=200)
-        if texto_colado:
-            try:
-                if "Pix" in texto_colado or "Aprovada" in texto_colado:
-                    linhas = texto_colado.split('\n')
-                    vendas_pdf = []
-                    padrao_valor = r'(?:\+\s*)?(\d{1,3}(?:\.\d{3})*,\d{2})'
-                    for linha in linhas:
-                        if "Aprovada" in linha and ("Pix" in linha or "Cartão" in linha):
-                            matches = re.findall(padrao_valor, linha)
-                            if matches: vendas_pdf.append({"Valor": float(matches[0].replace('.', '').replace(',', '.'))})
-                    if vendas_pdf: df_vendas = pd.DataFrame(vendas_pdf)
-                else:
-                    df = pd.read_csv(io.StringIO(texto_colado), sep=',')
-                    df_vendas = df[df['Status'] == 'Aprovada'].copy()
-                    df_vendas['Valor'] = df_vendas['Valor (R$)'].astype(str).str.replace('.', '').str.replace(',', '.').astype(float)
-            except Exception as e:
-                st.error(f"Erro ao ler o texto colado: {e}")
+    
+    if arquivo_csv is not None:
+        try:
+            df = pd.read_csv(arquivo_csv, encoding='utf-8')
+            
+            # Tenta achar a coluna de valor (InfinityPay ou genérica)
+            coluna_valor = 'Valor (R$)' if 'Valor (R$)' in df.columns else ('Valor' if 'Valor' in df.columns else None)
+            coluna_status = 'Status' if 'Status' in df.columns else None
+            
+            if coluna_valor:
+                df_vendas = df.copy()
+                if coluna_status: 
+                    df_vendas = df_vendas[df_vendas[coluna_status] == 'Aprovada']
+                    
+                # Converte os valores para numérico
+                df_vendas['Valor'] = df_vendas[coluna_valor].astype(str).str.replace('.', '').str.replace(',', '.').astype(float)
+            else:
+                st.error("O arquivo enviado não tem a coluna 'Valor' ou 'Valor (R$)'.")
+                
+        except Exception as e:
+            st.error(f"Erro ao ler o arquivo: {e}")
 
     if df_vendas is not None and not df_vendas.empty:
-        st.success(f"📊 Arquivo lido com sucesso! Encontradas **{len(df_vendas)}** vendas aprovadas.")
+        st.success(f"📊 Arquivo lido com sucesso! Encontradas **{len(df_vendas)}** vendas.")
         st.write(f"💰 Valor total: **R$ {df_vendas['Valor'].sum():.2f}**")
         st.divider()
         
@@ -273,6 +248,7 @@ with aba_csv:
                 for index, row in vendas_para_emitir.iterrows():
                     valor_venda = float(row['Valor'])
                     status_texto.write(f"⏳ Emitindo nota {index+1} de {len(vendas_para_emitir)} (R$ {valor_venda:.2f})...")
+                    
                     carrinho = montar_carrinho(valor_venda, produtos)
                     if carrinho:
                         status_code, retorno = emitir_nota_focus(carrinho['itens'], carrinho['diferenca'], valor_venda, CNPJ_CLIENTE, TOKEN_CLIENTE)
@@ -285,13 +261,15 @@ with aba_csv:
                             for item in carrinho['itens']:
                                 supabase.table('estoque_movimentacoes').insert({
                                     'cliente_id': ID_CLIENTE, 'produto_id': item['id'], 'tipo_movimento': 'SAIDA',
-                                    'quantidade': item['quantidade'], 'valor_unitario': item['preco_unitario'], 'origem': 'VENDA_ARQUIVO'
+                                    'quantidade': item['quantidade'], 'valor_unitario': item['preco_unitario'], 'origem': 'VENDA_CSV'
                                 }).execute()
                             sucessos += 1
                         else: erros += 1
                     else: erros += 1
+                    
                     progresso.progress((index + 1) / len(vendas_para_emitir))
                     time.sleep(2)
+                
                 status_texto.empty()
                 st.success(f"🏁 Finalizado! Sucessos: {sucessos} | Erros: {erros}")
                 st.rerun()
