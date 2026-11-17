@@ -52,7 +52,8 @@ auth_encoded = base64.b64encode(f"{TOKEN_CLIENTE}:".encode()).decode()
 # --- FUNÇÕES ---
 @st.cache_data(ttl=60)
 def buscar_produtos_com_estoque(id_cliente):
-    produtos = supabase.table('produtos').select('id, descricao, preco_venda, ncm, ean, sujeito_st').eq('cliente_id', id_cliente).execute()
+    # AGORA BUSCA A UNIDADE TAMBÉM
+    produtos = supabase.table('produtos').select('id, descricao, preco_venda, ncm, ean, sujeito_st, unidade').eq('cliente_id', id_cliente).execute()
     produtos_com_estoque = []
     for p in produtos.data:
         if p.get('preco_venda') is None or p['preco_venda'] <= 0: continue
@@ -62,7 +63,8 @@ def buscar_produtos_com_estoque(id_cliente):
             produtos_com_estoque.append({
                 'id': p['id'], 'descricao': p['descricao'], 'preco': float(p['preco_venda']),
                 'saldo': saldo, 'ncm': p.get('ncm') or '61091000', 'ean': p.get('ean') or 'SEM GTIN',
-                'sujeito_st': p.get('sujeito_st', False)
+                'sujeito_st': p.get('sujeito_st', False),
+                'unidade': p.get('unidade') or 'UN' # <-- NOVO CAMPO
             })
     return produtos_com_estoque
 
@@ -75,7 +77,8 @@ def emitir_nota_focus(carrinho, valor_desconto, valor_total, cnpj_emitente, toke
         csosn_saida = "500" if item.get('sujeito_st') else "102"
         item_json = {
             "numero_item": str(index + 1), "codigo_produto": str(item['id'])[:10], 
-            "descricao": item['descricao'], "cfop": cfop_saida, "unidade_comercial": "UN",
+            "descricao": item['descricao'], "cfop": cfop_saida, 
+            "unidade_comercial": item.get('unidade', 'UN'), # <-- USA A UNIDADE DO PRODUTO
             "quantidade_comercial": float(item['quantidade']), "valor_unitario_comercial": float(item['preco_unitario']),
             "valor_bruto": float(item['subtotal']), "codigo_ncm": item['ncm'], "codigo_ean": item['ean'],
             "icms_situacao_tributaria": csosn_saida, "icms_origem": "0",
@@ -120,7 +123,7 @@ def montar_carrinho_rapido(valor_alvo, produtos):
             carrinho.append({
                 'id': p['id'], 'descricao': p['descricao'], 'quantidade': qtd_necessaria,
                 'preco_unitario': p['preco'], 'subtotal': subtotal, 'ncm': p['ncm'],
-                'ean': p['ean'], 'sujeito_st': p['sujeito_st']
+                'ean': p['ean'], 'sujeito_st': p['sujeito_st'], 'unidade': p['unidade']
             })
             valor_atual += subtotal
     if valor_atual > 0:
@@ -182,7 +185,7 @@ with aba_detalhada:
             for p in produtos_filtrados:
                 with st.container():
                     col_nome, col_qtd, col_btn = st.columns([3, 1, 1])
-                    col_nome.write(f"**{p['descricao']}** (Estoque: {p['saldo']:g}) - R$ {p['preco']:.2f}")
+                    col_nome.write(f"**{p['descricao']}** (Estoque: {p['saldo']:g} {p['unidade']}) - R$ {p['preco']:.2f}")
                     qtd = col_qtd.number_input("Qtd", min_value=1.0, max_value=float(p['saldo']), step=1.0, key=f"qtd_{p['id']}", label_visibility="collapsed")
                     if col_btn.button("➕ Adicionar", key=f"btn_{p['id']}"):
                         item_existente = next((item for item in st.session_state.carrinho_manual if item['id'] == p['id']), None)
@@ -193,7 +196,7 @@ with aba_detalhada:
                             st.session_state.carrinho_manual.append({
                                 'id': p['id'], 'descricao': p['descricao'], 'quantidade': qtd,
                                 'preco_unitario': p['preco'], 'subtotal': qtd * p['preco'], 
-                                'ncm': p['ncm'], 'ean': p['ean'], 'sujeito_st': p['sujeito_st']
+                                'ncm': p['ncm'], 'ean': p['ean'], 'sujeito_st': p['sujeito_st'], 'unidade': p['unidade']
                             })
                         st.rerun()
         else:
@@ -208,9 +211,8 @@ with aba_detalhada:
         for i, item in enumerate(st.session_state.carrinho_manual):
             col_desc, col_preco, col_subtotal, col_rem = st.columns([3, 1.5, 1.5, 0.5])
             
-            col_desc.write(f"**{item['quantidade']:g}x** {item['descricao']}")
+            col_desc.write(f"**{item['quantidade']:g} {item['unidade']}** {item['descricao']}")
             
-            # CAMPO PARA ALTERAR O PREÇO
             novo_preco = col_preco.number_input(
                 "Preço Unit. (R$)", 
                 value=float(item['preco_unitario']), 
@@ -278,7 +280,7 @@ with aba_rapida:
         dados = st.session_state.carrinho_atual
         st.success(f"✅ Carrinho montado! Desconto: R$ {dados['diferenca']:.2f}")
         for item in dados['itens']:
-            st.write(f"📦 **{item['quantidade']:g}x** {item['descricao']} - R$ {item['preco_unitario']:.2f}")
+            st.write(f"📦 **{item['quantidade']:g} {item['unidade']}** {item['descricao']} - R$ {item['preco_unitario']:.2f}")
         st.write(f"### 🎯 Total a Pagar: R$ {dados['valor_alvo']:.2f}")
         
         if st.button("🚀 Confirmar e Emitir NFC-e", type="primary", key="btn_emitir_manual"):
