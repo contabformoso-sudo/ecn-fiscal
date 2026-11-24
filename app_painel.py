@@ -44,7 +44,7 @@ if st.session_state.cliente_logado is None:
 
 # Se chegou aqui, está logado!
 cliente = st.session_state.cliente_logado
-TOKEN_CLIENTE = cliente.get('token_focus_producao', '').strip() # <-- ALTERADO PARA PRODUÇÃO
+TOKEN_CLIENTE = cliente.get('token_focus_producao', '').strip()
 CNPJ_CLIENTE = cliente['cnpj']
 ID_CLIENTE = cliente['id']
 auth_encoded = base64.b64encode(f"{TOKEN_CLIENTE}:".encode()).decode()
@@ -97,7 +97,7 @@ def emitir_nota_focus(carrinho, valor_desconto, valor_total, cnpj_emitente, toke
     }
     headers = {"Authorization": f"Basic {auth_encoded}", "Content-Type": "application/json"}
     ref_nota = f"pdv_{int(time.time())}_{random.randint(1,999)}" 
-    url_focus = f"https://api.focusnfe.com.br/v2/nfce?ref={ref_nota}" # <-- ALTERADO PARA PRODUÇÃO
+    url_focus = f"https://api.focusnfe.com.br/v2/nfce?ref={ref_nota}"
     try:
         response = requests.post(url_focus, json=payload, headers=headers)
         return response.status_code, response.json()
@@ -132,7 +132,8 @@ def montar_carrinho_rapido(valor_alvo, produtos):
 def calcular_faturamento_mes(id_cliente):
     hoje = datetime.now()
     primeiro_dia = hoje.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
-    notas = supabase.table('notas_emitidas').select('valor_total').eq('cliente_id', id_cliente).gte('emitida_em', primeiro_dia).execute()
+    # FILTRA APENAS PRODUÇÃO
+    notas = supabase.table('notas_emitidas').select('valor_total').eq('cliente_id', id_cliente).eq('ambiente', 'producao').gte('emitida_em', primeiro_dia).execute()
     total = sum(float(n['valor_total']) for n in notas.data) if notas.data else 0.0
     return total, len(notas.data)
 
@@ -242,7 +243,8 @@ with aba_detalhada:
                     supabase.table('notas_emitidas').insert({
                         'cliente_id': ID_CLIENTE, 'cliente_cnpj': CNPJ_CLIENTE, 'numero_nota': retorno.get('numero'),
                         'serie': retorno.get('serie'), 'chave_acesso': retorno.get('chave_nfe', '').replace('NFe', ''),
-                        'status': retorno.get('status'), 'valor_total': total_carrinho, 'json_retorno': retorno
+                        'status': retorno.get('status'), 'valor_total': total_carrinho, 'json_retorno': retorno,
+                        'ambiente': 'producao' # <-- NOVO CAMPO
                     }).execute()
                     for item in st.session_state.carrinho_manual:
                         supabase.table('estoque_movimentacoes').insert({
@@ -289,7 +291,8 @@ with aba_rapida:
                     supabase.table('notas_emitidas').insert({
                         'cliente_id': ID_CLIENTE, 'cliente_cnpj': CNPJ_CLIENTE, 'numero_nota': retorno.get('numero'),
                         'serie': retorno.get('serie'), 'chave_acesso': retorno.get('chave_nfe', '').replace('NFe', ''),
-                        'status': retorno.get('status'), 'valor_total': dados['valor_alvo'], 'json_retorno': retorno
+                        'status': retorno.get('status'), 'valor_total': dados['valor_alvo'], 'json_retorno': retorno,
+                        'ambiente': 'producao' # <-- NOVO CAMPO
                     }).execute()
                     for item in dados['itens']:
                         supabase.table('estoque_movimentacoes').insert({
@@ -348,7 +351,8 @@ with aba_csv:
                             supabase.table('notas_emitidas').insert({
                                 'cliente_id': ID_CLIENTE, 'cliente_cnpj': CNPJ_CLIENTE, 'numero_nota': retorno.get('numero'),
                                 'serie': retorno.get('serie'), 'chave_acesso': retorno.get('chave_nfe', '').replace('NFe', ''),
-                                'status': retorno.get('status'), 'valor_total': valor_venda, 'json_retorno': retorno
+                                'status': retorno.get('status'), 'valor_total': valor_venda, 'json_retorno': retorno,
+                                'ambiente': 'producao' # <-- NOVO CAMPO
                             }).execute()
                             for item in carrinho['itens']:
                                 supabase.table('estoque_movimentacoes').insert({
@@ -367,7 +371,8 @@ with aba_csv:
 # --- ABA 4: HISTÓRICO ---
 with aba_historico:
     st.header("🧾 Histórico de Notas Emitidas")
-    notas = supabase.table('notas_emitidas').select('*').eq('cliente_id', ID_CLIENTE).order('emitida_em', desc=True).limit(50).execute()
+    # FILTRA APENAS PRODUÇÃO
+    notas = supabase.table('notas_emitidas').select('*').eq('cliente_id', ID_CLIENTE).eq('ambiente', 'producao').order('emitida_em', desc=True).limit(50).execute()
     if notas.data:
         for n in notas.data:
             data_formatada = "Data não disponível"
@@ -380,7 +385,7 @@ with aba_historico:
                 json_retorno = n.get('json_retorno', {})
                 caminho_danfe = json_retorno.get('caminho_danfe')
                 if caminho_danfe:
-                    url_danfe = f"https://api.focusnfe.com.br{caminho_danfe}" # <-- ALTERADO PARA PRODUÇÃO
+                    url_danfe = f"https://api.focusnfe.com.br{caminho_danfe}"
                     st.markdown(f"[📥 Clique aqui para baixar o DANFE (PDF)]({url_danfe})")
                 else:
                     st.warning("Link do PDF não disponível para esta nota.")
