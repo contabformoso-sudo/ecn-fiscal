@@ -44,7 +44,7 @@ if st.session_state.cliente_logado is None:
 
 # Se chegou aqui, está logado!
 cliente = st.session_state.cliente_logado
-TOKEN_CLIENTE = cliente.get('token_focus_homologacao', '').strip()
+TOKEN_CLIENTE = cliente.get('token_focus_producao', '').strip() # <-- ALTERADO PARA PRODUÇÃO
 CNPJ_CLIENTE = cliente['cnpj']
 ID_CLIENTE = cliente['id']
 auth_encoded = base64.b64encode(f"{TOKEN_CLIENTE}:".encode()).decode()
@@ -52,7 +52,6 @@ auth_encoded = base64.b64encode(f"{TOKEN_CLIENTE}:".encode()).decode()
 # --- FUNÇÕES ---
 @st.cache_data(ttl=60)
 def buscar_produtos_com_estoque(id_cliente):
-    # AGORA BUSCA A UNIDADE TAMBÉM
     produtos = supabase.table('produtos').select('id, descricao, preco_venda, ncm, ean, sujeito_st, unidade').eq('cliente_id', id_cliente).execute()
     produtos_com_estoque = []
     for p in produtos.data:
@@ -64,7 +63,7 @@ def buscar_produtos_com_estoque(id_cliente):
                 'id': p['id'], 'descricao': p['descricao'], 'preco': float(p['preco_venda']),
                 'saldo': saldo, 'ncm': p.get('ncm') or '61091000', 'ean': p.get('ean') or 'SEM GTIN',
                 'sujeito_st': p.get('sujeito_st', False),
-                'unidade': p.get('unidade') or 'UN' # <-- NOVO CAMPO
+                'unidade': p.get('unidade') or 'UN'
             })
     return produtos_com_estoque
 
@@ -78,7 +77,7 @@ def emitir_nota_focus(carrinho, valor_desconto, valor_total, cnpj_emitente, toke
         item_json = {
             "numero_item": str(index + 1), "codigo_produto": str(item['id'])[:10], 
             "descricao": item['descricao'], "cfop": cfop_saida, 
-            "unidade_comercial": item.get('unidade', 'UN'), # <-- USA A UNIDADE DO PRODUTO
+            "unidade_comercial": item.get('unidade', 'UN'),
             "quantidade_comercial": float(item['quantidade']), "valor_unitario_comercial": float(item['preco_unitario']),
             "valor_bruto": float(item['subtotal']), "codigo_ncm": item['ncm'], "codigo_ean": item['ean'],
             "icms_situacao_tributaria": csosn_saida, "icms_origem": "0",
@@ -98,7 +97,7 @@ def emitir_nota_focus(carrinho, valor_desconto, valor_total, cnpj_emitente, toke
     }
     headers = {"Authorization": f"Basic {auth_encoded}", "Content-Type": "application/json"}
     ref_nota = f"pdv_{int(time.time())}_{random.randint(1,999)}" 
-    url_focus = f"https://homologacao.focusnfe.com.br/v2/nfce?ref={ref_nota}"
+    url_focus = f"https://api.focusnfe.com.br/v2/nfce?ref={ref_nota}" # <-- ALTERADO PARA PRODUÇÃO
     try:
         response = requests.post(url_focus, json=payload, headers=headers)
         return response.status_code, response.json()
@@ -381,7 +380,7 @@ with aba_historico:
                 json_retorno = n.get('json_retorno', {})
                 caminho_danfe = json_retorno.get('caminho_danfe')
                 if caminho_danfe:
-                    url_danfe = f"https://homologacao.focusnfe.com.br{caminho_danfe}"
+                    url_danfe = f"https://api.focusnfe.com.br{caminho_danfe}" # <-- ALTERADO PARA PRODUÇÃO
                     st.markdown(f"[📥 Clique aqui para baixar o DANFE (PDF)]({url_danfe})")
                 else:
                     st.warning("Link do PDF não disponível para esta nota.")
